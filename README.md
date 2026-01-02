@@ -111,7 +111,7 @@
 
 ### 生成二维码
 
-1. 复制你的 Worker 地址（如 `https://movecar.你的账号.workers.dev`）
+1. 复制你绑定的自定义域名或者你的 Worker 地址（如 `https://movecar.你的账号.workers.dev`）
 2. 使用任意二维码生成工具（如 草料二维码、QR Code Generator）
 3. 将链接转换为二维码并下载
 
