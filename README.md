@@ -1,176 +1,112 @@
-﻿# MoveCar - 挪车通知系统
+# MoveCar - 多用户智能挪车系统 (v2.0)
 
-基于 Cloudflare Workers 的智能挪车通知系统，扫码即可通知车主，保护双方隐私。
+基于 Cloudflare Workers 的智能挪车通知系统，扫码即可通知车主，保护双方隐私。**v2.0 版本现已支持单实例多用户并发使用。**
 
-## 界面预览
+## 🌐 界面预览
 
 | 请求者页面 | 车主页面 |
 |:---:|:---:|
 | [🔗 在线预览](https://htmlpreview.github.io/?https://github.com/lesnolie/movecar/blob/main/preview-requester.html) | [🔗 在线预览](https://htmlpreview.github.io/?https://github.com/lesnolie/movecar/blob/main/preview-owner.html) |
 
-## 为什么需要它？
+---
 
-- 🚗 **被堵车却找不到车主** - 干着急没办法
-- 📱 **传统挪车码暴露电话** - 隐私泄露、骚扰电话不断
-- 😈 **恶意扫码骚扰** - 有人故意反复扫码打扰
-- 🤔 **路人好奇扫码** - 并不需要挪车却触发通知
+## ❓ 为什么需要它？
 
-## 这个系统如何解决？
+- 🚗 **被堵车却找不到车主** - 干着急没办法。
+- 📱 **传统挪车码暴露电话** - 隐私泄露、广告骚扰电话不断。
+- 😈 **恶意扫码骚扰** - 有人故意反复扫码打扰车主。
+- 🤔 **路人好奇扫码** - 并不需要挪车却触发了通知。
 
-- ✅ **不暴露电话号码** - 通过推送通知联系，保护隐私
-- ✅ **双向位置共享** - 车主可确认请求者确实在车旁
-- ✅ **无位置延迟 30 秒** - 降低恶意骚扰的动力
-- ✅ **免费部署** - Cloudflare Workers 免费额度完全够用
-- ✅ **无需服务器** - Serverless 架构，零运维成本
+## ✅ 这个系统如何解决？
 
-## 为什么使用 Bark 推送？
+- 🚀 **多用户架构 (v2.0)** - 一次部署，全家可用。通过 `?u=用户ID` 区分不同车主。
+- 🔐 **不暴露电话号码** - 通过微信或 Bark 推送通知联系，完全隐藏真实号。
+- 📍 **双向位置共享** - 车主可确认请求者是否真的在车旁，避免无效驱奔。
+- ⏳ **智能频率控制** - **每个用户独立计算** 60秒冷却时间，互不干扰，有效防骚扰。
+- 🆓 **免费零成本** - 利用 Cloudflare Workers 免费额度，无需服务器，无需备案。
 
-- 🔔 支持「紧急 / 重要 / 警告」通知级别
-- 🎵 可自定义通知音效
-- 🌙 **即使开启勿扰模式也能收到提醒**
-- 📱 安卓用户：原理相通，将 Bark 替换为安卓推送服务即可（如 Pushplus、Server酱）
+---
 
-## 使用流程
+## 🔔 为什么推荐推送方式？
 
-### 请求者（需要挪车的人）
+### Bark (iOS 推荐)
+- 支持「紧急 / 重要 / 警告」通知级别。
+- 可自定义通知音效，甚至在**开启勿扰模式**时也能强提醒。
 
-1. 扫描车上的二维码，进入通知页面
-2. 填写留言（可选），如「挡住出口了」
-3. 允许获取位置（不允许则延迟 30 秒发送）
-4. 点击「通知车主」
-5. 等待车主确认，可查看车主位置
+### PushPlus (微信推荐)
+- 零门槛，只需微信扫码关注即可接收通知。
+- 支持 HTML 格式，点击通知即可直接跳转到确认处理页面。
 
-### 车主
+---
 
-1. 收到 Bark 推送通知
-2. 点击通知进入确认页面
-3. 查看请求者位置（判断是否真的在车旁）
-4. 点击确认，分享自己位置给对方
+## 🔄 使用流程
 
-### 流程图
+### **请求者（路人）**
+1. 扫描车上二维码，进入页面。
+2. 填写留言（如「挡住出口了」）。
+3. **允许获取位置**（若拒绝，系统将强制延迟 30 秒发送，降低恶意扫码动力）。
+4. 点击「通知车主」，等待状态更新。
 
-```
-请求者                              车主
-  │                                  │
-  ├─ 扫码进入页面                     │
-  ├─ 填写留言、获取位置                │
-  ├─ 点击发送                         │
-  │   ├─ 有位置 → 立即推送 ──────────→ 收到通知
-  │   └─ 无位置 → 30秒后推送 ────────→ 收到通知
-  │                                  │
-  ├─ 等待中...                        ├─ 查看请求者位置
-  │                                  ├─ 点击确认，分享位置
-  │                                  │
-  ├─ 收到确认，查看车主位置 ←──────────┤
-  │                                  │
-  ▼                                  ▼
-```
+### **车主（您）**
+1. 手机即时收到推送通知。
+2. 点击通知进入确认页面，查看请求者位置。
+3. 点击「我已知晓，马上过去」，系统自动同步状态给请求者。
 
-## 部署教程
+---
 
-### 第一步：注册 Cloudflare 账号
+## 🛠️ 部署教程
 
-1. 打开 https://dash.cloudflare.com/sign-up
-2. 输入邮箱和密码，完成注册
+### 第一步：注册 Cloudflare
+打开 [dash.cloudflare.com](https://dash.cloudflare.com/) 注册并登录。
 
 ### 第二步：创建 Worker
+1. 进入「Workers & Pages」 -> 「Create」 -> 「Create Worker」。
+2. 名称填 `movecar`，点击「Deploy」。
+3. 点击「Edit code」，删除默认代码，将 **`worker.js`** 全部内容粘贴进去，点击右上角「Deploy」。
 
-1. 登录后点击左侧菜单「Workers & Pages」
-2. 点击「Create」→「Create Worker」
-3. 名称填 `movecar`（或你喜欢的名字）
-4. 点击「Deploy」
-5. 点击「Edit code」，删除默认代码
-6. 复制 `movecar.js` 全部内容粘贴进去
-7. 点击右上角「Deploy」保存
+### 第三步：配置 KV 存储 (必须)
+1. 点击左侧菜单「KV」。
+2. 创建一个命名空间，名称填：`MOVE_CAR_STATUS`。
+3. 回到你的 Worker -> 「Settings」 -> 「Bindings」。
+4. 添加「KV Namespace」，变量名填 `MOVE_CAR_STATUS`，选择刚才创建的空间，保存部署。
 
-### 第三步：创建 KV 存储
+### 第四步：配置环境变量 (多用户关键)
+在 Worker 的「Settings」 -> 「Variables and Secrets」中添加：
 
-1. 左侧菜单点击「KV」
-2. 点击「Create a namespace」
-3. 名称填 `MOVE_CAR_STATUS`，点击「Add」
-4. 回到你的 Worker →「Settings」→「Bindings」
-5. 点击「Add」→「KV Namespace」
-6. Variable name 填 `MOVE_CAR_STATUS`
-7. 选择刚创建的 namespace，点击「Deploy」
+#### 1. 默认全局变量 (可选)
+- `BARK_URL`：默认推送地址。
+- `PUSHPLUS_TOKEN`：默认微信令牌。
 
-### 第四步：配置环境变量
+#### 2. 用户专属变量 (强烈推荐)
+**格式：`变量名_用户ID` (ID需大写)**。例如你的 ID 是 `nianba`：
+- `PUSHPLUS_TOKEN_NIANBA`：该用户的专属令牌。
+- `CAR_TITLE_NIANBA`：显示的车辆/车主信息（如：辽A·88888）。
+- `PHONE_NUMBER_NIANBA`：该车主的备用电话（可选）。
 
-1. Worker →「Settings」→「Variables and Secrets」
-2. 添加以下变量（任选其一或全部添加）：
-   - `BARK_URL`：Bark 推送地址（iOS推荐，如 `https://api.day.app/xxxxx`）
-   - `PUSHPLUS_TOKEN`：PushPlus 令牌（微信推送推荐，去 [pushplus.plus](http://www.pushplus.plus/) 获取）
-   - `EXTERNAL_URL`：填入你的反代备案域名（例如 https://xx.xxx.com）-（可选，注意：带上https，末尾不要带斜杠)
-   - `PHONE_NUMBER`：备用联系电话（可选）
+### 第五步：绑定域名 (可选)
+在「Settings」 -> 「Domains & Routes」中绑定你的自定义域名。
 
-### 第五步：绑定域名（可选）
+---
 
-1. Worker →「Settings」→「Domains & Routes」
-2. 点击「Add」→「Custom Domain」
-3. 输入你的域名，按提示完成 DNS 配置
+## 🎨 制作挪车码
 
-## 制作挪车码
+### 1. 生成链接
+你的专属链接为：`https://你的域名/?u=你的ID`
+例如：`https://movecar.xxxx.workers.dev/?u=nianba`
 
-### 生成二维码
+### 2. 生成二维码
+使用 [草料二维码](https://cli.im/) 将链接转为二维码下载。
 
-1. 复制你绑定的自定义域名或者你的 Worker 地址（如 `https://movecar.你的账号.workers.dev`）
-2. 使用任意二维码生成工具（如 草料二维码、QR Code Generator）
-3. 将链接转换为二维码并下载
+### 3. 美化与打印
+- 使用 **Midjourney** 或 **ChatGPT (DALL-E)** 生成精美的挪车牌背景。
+- 将二维码组合排版，添加文字：**「扫码通知车主挪车」**。
+- 打印、过塑，贴在挡风玻璃处。
 
-### 美化挪车牌
+---
 
-使用 AI 工具生成精美的装饰设计：
+## 🛡️ 安全与隐私
+- **自动清理**：所有位置和状态信息在 1 小时后从 KV 中自动删除。
+- **并发安全**：v2.0 修复了语法陷阱，支持高并发环境下的稳定运行。
 
-- **Nanobanana Pro** - 生成装饰图案和背景
-- **ChatGPT** - 生成创意设计图
-
-制作步骤：
-
-1. 用 AI 工具生成你喜欢的装饰图案
-2. 将二维码与生成的图案组合排版
-3. 添加「扫码通知车主」提示文字
-4. 打印、过塑，贴在车上
-
-> 💡 用 AI 生成独一无二的挪车牌，让你的爱车更有个性！
-
-### 效果展示
-
-![挪车码效果](demo.jpg)
-
-## 安全设置（推荐）
-
-为防止境外恶意攻击，建议只允许中国地区访问：
-
-### 方法一：使用 WAF 规则（推荐）
-
-1. 进入 Cloudflare Dashboard → 你的域名
-2. 左侧菜单点击「Security」→「WAF」
-3. 点击「Create rule」
-4. 规则设置：
-   - Rule name：`Block non-CN traffic`
-   - If incoming requests match：`Country does not equal China`
-   - Then：`Block`
-5. 点击「Deploy」
-
-### 方法二：在 Worker 代码中过滤
-
-在 `movecar.js` 的 `handleRequest` 函数开头添加：
-
-```javascript
-async function handleRequest(request) {
-  const country = request.cf?.country;
-  if (country && country !== 'CN') {
-    return new Response('Access Denied', { status: 403 });
-  }
-
-  // 下面保持原有逻辑
-}
-```
-
-> ⚠️ 曾经被境外流量攻击过，强烈建议开启地区限制！
-
-## License
-
-MIT
-
-
-
+## 📄 许可证
+本项目采用 [MIT License](LICENSE) 开源。
