@@ -1,6 +1,6 @@
 /**
- * MoveCar 跨云终极适配版 + 强力诊断
- * 修复：阿里云 ESA 环境变量读取不到的深度兼容问题
+ * MoveCar 跨云终极适配版 + 强力诊断 (修复版)
+ * 删除了重复声明的函数，确保阿里云 ESA 构建成功
  */
 
 const CONFIG = {
@@ -54,23 +54,18 @@ function escapeHtml(unsafe) {
   return (unsafe || '').toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-/** * 强力抓取环境变量：不放过任何一个角落 
- */
 function getUserConfig(userKey, envPrefix, env) {
   const specificKey = envPrefix + "_" + userKey.toUpperCase();
   let val = null;
   
-  // 1. 标准 env 对象
   if (env && env[specificKey]) val = env[specificKey];
   else if (env && env[envPrefix]) val = env[envPrefix];
   
-  // 2. 全局 globalThis 对象 (阿里云 ESA 旧机制)
   if (!val && typeof globalThis !== 'undefined') {
     if (globalThis[specificKey]) val = globalThis[specificKey];
     else if (globalThis[envPrefix]) val = globalThis[envPrefix];
   }
 
-  // 3. process.env 对象
   if (!val && typeof process !== 'undefined' && process.env) {
     if (process.env[specificKey]) val = process.env[specificKey];
     else if (process.env[envPrefix]) val = process.env[envPrefix];
@@ -78,12 +73,7 @@ function getUserConfig(userKey, envPrefix, env) {
   return val;
 }
 
-function wgs84ToGcj02(lat, lng) {
-  // 简化的坐标转换... 保持原有核心逻辑
-  return { lat, lng }; // 为缩短长度展示，实际部署请保留原有的数十行数学计算代码，或直接用下面附带的完整包
-}
-
-// === 为了避免您复制漏掉代码，下面是完整的方法 ===
+// 坐标转换函数 (只保留一次)
 function wgs84ToGcj02(lat, lng) {
   const a = 6378245.0; const ee = 0.00669342162296594323;
   if (lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271) return { lat, lng };
@@ -115,20 +105,18 @@ function generateMapUrls(lat, lng) {
   return { amapUrl: "https://uri.amap.com/marker?position=" + gcj.lng + "," + gcj.lat + "&name=扫码者位置", appleUrl: "https://maps.apple.com/?ll=" + gcj.lat + "," + gcj.lng + "&q=扫码者位置" };
 }
 
-/** 发送通知逻辑 **/
 async function handleNotify(request, url, userKey, env, KV) {
   const ppToken = getUserConfig(userKey, 'PUSHPLUS_TOKEN', env);
   const barkUrl = getUserConfig(userKey, 'BARK_URL', env);
   const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
   
-  // 【诊断模块】如果还找不到，直接抛出它到底看到了什么环境变量
   if (!ppToken && !barkUrl) {
       let debugInfo = "env是空的";
       if (env) {
           try { debugInfo = "包含的键: " + Object.keys(env).join(', '); } 
           catch(e) { debugInfo = "env不可枚举"; }
       }
-      throw new Error(`配置读取失败! 寻找的Key: BARK_URL。当前环境诊断: [${debugInfo}]`);
+      throw new Error(`系统未配置推送渠道(BARK或PushPlus)。诊断信息: [${debugInfo}]`);
   }
 
   const lockKey = "lock_" + userKey;
@@ -200,11 +188,10 @@ async function handleOwnerConfirmAction(request, userKey, KV) {
   return new Response(JSON.stringify({ success: true }));
 }
 
-/** 界面渲染：请求者页 **/
 function renderMainPage(origin, userKey, env) {
   const phone = escapeHtml(getUserConfig(userKey, 'PHONE_NUMBER', env) || '');
   const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
-  const phoneHtml = phone ? '<a href="tel:' + phone + '" class="btn-phone">📞 拨打车主电话</a>' : '';
+  const phoneHtml = phone ? `<a href="tel:${phone}" class="btn-phone">📞 拨打车主电话</a>` : '';
 
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -335,7 +322,7 @@ function renderOwnerPage(userKey, env) {
   <style>
     body { font-family: sans-serif; background: #667eea; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin:0; padding:20px; }
     .card { background: white; padding: 30px; border-radius: 28px; text-align: center; width: 100%; max-width: 400px; }
-    .btn { background: #10b981; color: white; border: none; width: 100%; padding: 20px; border-radius: 16px; font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 20px; }
+    .btn { background: #10b981; color: white; border: none; width: 100%; padding: 20px; border-radius: 16px; font-size: 18px; font-weight: bold; cursor: margin-top: 20px; }
     .map-box { display: none; background: #f0f4ff; padding: 15px; border-radius: 15px; margin-top: 15px; }
     .map-btn { display: inline-block; padding: 10px 15px; background: #1890ff; color: white; text-decoration: none; border-radius: 10px; margin: 5px; font-size: 14px; }
   </style>
