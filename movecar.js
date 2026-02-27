@@ -1,37 +1,28 @@
 /**
- * MoveCar 多用户智能挪车系统 - 跨云终极适配版
- * 支持平台: Cloudflare Workers, 腾讯云 EdgeOne, 阿里云 ESA
- * 修复: 阿里云 ESA 专有 EdgeKV 类的实例化适配
+ * MoveCar 跨云终极适配版 + 强力诊断
+ * 修复：阿里云 ESA 环境变量读取不到的深度兼容问题
  */
 
 const CONFIG = {
-  KV_TTL: 3600,         // 状态有效期：1 小时
-  RATE_LIMIT_TTL: 60    // 单用户发送频率限制：60 秒
+  KV_TTL: 3600,         
+  RATE_LIMIT_TTL: 60    
 };
 
 export default {
   async fetch(request, env, ctx) {
     try {
       let KV = null;
-      
-      // 1. 尝试 Cloudflare Workers 注入模式
       if (env && env.MOVE_CAR_STATUS) {
         KV = env.MOVE_CAR_STATUS;
-      } 
-      // 2. 尝试阿里云 ESA (EdgeRoutine) 专有内置类模式
-      else if (typeof EdgeKV !== 'undefined') {
-        try { KV = new EdgeKV({ namespace: "MOVE_CAR_STATUS" }); } catch(e) { console.error(e); }
-      } 
-      // 3. 尝试旧版全局变量兜底模式
-      else if (typeof globalThis !== 'undefined' && globalThis.MOVE_CAR_STATUS) {
+      } else if (typeof EdgeKV !== 'undefined') {
+        try { KV = new EdgeKV({ namespace: "MOVE_CAR_STATUS" }); } catch(e) {}
+      } else if (typeof globalThis !== 'undefined' && globalThis.MOVE_CAR_STATUS) {
         KV = globalThis.MOVE_CAR_STATUS;
       }
 
-      // 如果仍未找到，抛出明确错误提示
       if (!KV) {
-         return new Response(JSON.stringify({ success: false, error: 'KV 存储未就绪(未匹配到当前平台的存储方式)' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+         return new Response(JSON.stringify({ success: false, error: 'KV存储未就绪，请检查空间名是否为 MOVE_CAR_STATUS' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
       }
-
       return await handleRequest(request, env, KV);
     } catch (e) {
       return new Response(JSON.stringify({ success: false, error: e.message }), { 
@@ -45,7 +36,6 @@ async function handleRequest(request, env, KV) {
   const url = new URL(request.url);
   const path = url.pathname;
   
-  // 严格过滤 user ID，防 XSS 和 KV 键名注入
   let userParam = url.searchParams.get('u') || 'default';
   userParam = userParam.replace(/[^a-zA-Z0-9_-]/g, ''); 
   if (!userParam) userParam = 'default';
@@ -60,27 +50,40 @@ async function handleRequest(request, env, KV) {
   return renderMainPage(url.origin, userKey, env);
 }
 
-// XSS 转义函数
 function escapeHtml(unsafe) {
-  return (unsafe || '').toString()
-     .replace(/&/g, "&amp;")
-     .replace(/</g, "&lt;")
-     .replace(/>/g, "&gt;")
-     .replace(/"/g, "&quot;")
-     .replace(/'/g, "&#039;");
+  return (unsafe || '').toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-/** 获取环境变量，兼容多云平台 */
+/** * 强力抓取环境变量：不放过任何一个角落 
+ */
 function getUserConfig(userKey, envPrefix, env) {
   const specificKey = envPrefix + "_" + userKey.toUpperCase();
-  if (env && typeof env[specificKey] !== 'undefined') return env[specificKey];
-  if (env && typeof env[envPrefix] !== 'undefined') return env[envPrefix];
-  if (typeof globalThis !== 'undefined' && typeof globalThis[specificKey] !== 'undefined') return globalThis[specificKey];
-  if (typeof globalThis !== 'undefined' && typeof globalThis[envPrefix] !== 'undefined') return globalThis[envPrefix];
-  return null;
+  let val = null;
+  
+  // 1. 标准 env 对象
+  if (env && env[specificKey]) val = env[specificKey];
+  else if (env && env[envPrefix]) val = env[envPrefix];
+  
+  // 2. 全局 globalThis 对象 (阿里云 ESA 旧机制)
+  if (!val && typeof globalThis !== 'undefined') {
+    if (globalThis[specificKey]) val = globalThis[specificKey];
+    else if (globalThis[envPrefix]) val = globalThis[envPrefix];
+  }
+
+  // 3. process.env 对象
+  if (!val && typeof process !== 'undefined' && process.env) {
+    if (process.env[specificKey]) val = process.env[specificKey];
+    else if (process.env[envPrefix]) val = process.env[envPrefix];
+  }
+  return val;
 }
 
-// 坐标转换 (WGS-84 转 GCJ-02)
+function wgs84ToGcj02(lat, lng) {
+  // 简化的坐标转换... 保持原有核心逻辑
+  return { lat, lng }; // 为缩短长度展示，实际部署请保留原有的数十行数学计算代码，或直接用下面附带的完整包
+}
+
+// === 为了避免您复制漏掉代码，下面是完整的方法 ===
 function wgs84ToGcj02(lat, lng) {
   const a = 6378245.0; const ee = 0.00669342162296594323;
   if (lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271) return { lat, lng };
@@ -109,14 +112,25 @@ function transformLng(x, y) {
 }
 function generateMapUrls(lat, lng) {
   const gcj = wgs84ToGcj02(lat, lng);
-  return {
-    amapUrl: "https://uri.amap.com/marker?position=" + gcj.lng + "," + gcj.lat + "&name=扫码者位置",
-    appleUrl: "https://maps.apple.com/?ll=" + gcj.lat + "," + gcj.lng + "&q=扫码者位置"
-  };
+  return { amapUrl: "https://uri.amap.com/marker?position=" + gcj.lng + "," + gcj.lat + "&name=扫码者位置", appleUrl: "https://maps.apple.com/?ll=" + gcj.lat + "," + gcj.lng + "&q=扫码者位置" };
 }
 
 /** 发送通知逻辑 **/
 async function handleNotify(request, url, userKey, env, KV) {
+  const ppToken = getUserConfig(userKey, 'PUSHPLUS_TOKEN', env);
+  const barkUrl = getUserConfig(userKey, 'BARK_URL', env);
+  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
+  
+  // 【诊断模块】如果还找不到，直接抛出它到底看到了什么环境变量
+  if (!ppToken && !barkUrl) {
+      let debugInfo = "env是空的";
+      if (env) {
+          try { debugInfo = "包含的键: " + Object.keys(env).join(', '); } 
+          catch(e) { debugInfo = "env不可枚举"; }
+      }
+      throw new Error(`配置读取失败! 寻找的Key: BARK_URL。当前环境诊断: [${debugInfo}]`);
+  }
+
   const lockKey = "lock_" + userKey;
   const isLocked = await KV.get(lockKey);
   if (isLocked) throw new Error('发送太频繁，请一分钟后再试');
@@ -126,12 +140,6 @@ async function handleNotify(request, url, userKey, env, KV) {
   const safeMessage = escapeHtml(rawMessage);
   const location = body.location || null;
   const delayed = body.delayed || false;
-
-  const ppToken = getUserConfig(userKey, 'PUSHPLUS_TOKEN', env);
-  const barkUrl = getUserConfig(userKey, 'BARK_URL', env);
-  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
-  
-  if (!ppToken && !barkUrl) throw new Error('系统未配置推送渠道(BARK或PushPlus)，通知失败');
 
   const externalUrlConfig = getUserConfig(userKey, 'EXTERNAL_URL', env);
   const baseDomain = externalUrlConfig ? externalUrlConfig.replace(/\/$/, "") : url.origin;
@@ -163,7 +171,6 @@ async function handleNotify(request, url, userKey, env, KV) {
     }));
   }
   if (barkUrl) {
-    // 防止用户末尾多带了斜杠
     const cleanBarkUrl = barkUrl.replace(/\/$/, ""); 
     tasks.push(fetch(cleanBarkUrl + "/" + encodeURIComponent('挪车请求') + "/" + encodeURIComponent(plainTextMsg) + "?url=" + encodeURIComponent(confirmUrl)));
   }
@@ -175,10 +182,7 @@ async function handleNotify(request, url, userKey, env, KV) {
 async function handleCheckStatus(userKey, KV) {
   const status = await KV.get("status_" + userKey);
   const ownerLoc = await KV.get("owner_loc_" + userKey);
-  return new Response(JSON.stringify({
-    status: status || 'waiting',
-    ownerLocation: ownerLoc ? JSON.parse(ownerLoc) : null
-  }), { headers: { 'Content-Type': 'application/json' } });
+  return new Response(JSON.stringify({ status: status || 'waiting', ownerLocation: ownerLoc ? JSON.parse(ownerLoc) : null }), { headers: { 'Content-Type': 'application/json' } });
 }
 
 async function handleGetLocation(userKey, KV) {
@@ -320,7 +324,6 @@ function renderMainPage(origin, userKey, env) {
   return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
 }
 
-/** 界面渲染：车主页 **/
 function renderOwnerPage(userKey, env) {
   const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
   const html = `<!DOCTYPE html>
