@@ -1,7 +1,7 @@
 /**
- * MoveCar 多用户智能挪车系统 - 跨云安全重构版
+ * MoveCar 多用户智能挪车系统 - 跨云终极适配版
  * 支持平台: Cloudflare Workers, 腾讯云 EdgeOne, 阿里云 ESA
- * 修复: 阿里云 ESA 环境变量及 KV 全局注入的兼容性适配
+ * 修复: 阿里云 ESA 专有 EdgeKV 类的实例化适配
  */
 
 const CONFIG = {
@@ -12,8 +12,26 @@ const CONFIG = {
 export default {
   async fetch(request, env, ctx) {
     try {
-      // [核心兼容] 兼容 Cloudflare(从 env 读取) 和 阿里云ESA(从 globalThis 读取)
-      const KV = (env && env.MOVE_CAR_STATUS) || globalThis.MOVE_CAR_STATUS;
+      let KV = null;
+      
+      // 1. 尝试 Cloudflare Workers 注入模式
+      if (env && env.MOVE_CAR_STATUS) {
+        KV = env.MOVE_CAR_STATUS;
+      } 
+      // 2. 尝试阿里云 ESA (EdgeRoutine) 专有内置类模式
+      else if (typeof EdgeKV !== 'undefined') {
+        try { KV = new EdgeKV({ namespace: "MOVE_CAR_STATUS" }); } catch(e) { console.error(e); }
+      } 
+      // 3. 尝试旧版全局变量兜底模式
+      else if (typeof globalThis !== 'undefined' && globalThis.MOVE_CAR_STATUS) {
+        KV = globalThis.MOVE_CAR_STATUS;
+      }
+
+      // 如果仍未找到，抛出明确错误提示
+      if (!KV) {
+         return new Response(JSON.stringify({ success: false, error: 'KV 存储未就绪(未匹配到当前平台的存储方式)' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+      }
+
       return await handleRequest(request, env, KV);
     } catch (e) {
       return new Response(JSON.stringify({ success: false, error: e.message }), { 
@@ -52,13 +70,13 @@ function escapeHtml(unsafe) {
      .replace(/'/g, "&#039;");
 }
 
-/** 获取环境变量，兼容阿里云和 CF */
+/** 获取环境变量，兼容多云平台 */
 function getUserConfig(userKey, envPrefix, env) {
   const specificKey = envPrefix + "_" + userKey.toUpperCase();
   if (env && typeof env[specificKey] !== 'undefined') return env[specificKey];
   if (env && typeof env[envPrefix] !== 'undefined') return env[envPrefix];
-  if (typeof globalThis[specificKey] !== 'undefined') return globalThis[specificKey];
-  if (typeof globalThis[envPrefix] !== 'undefined') return globalThis[envPrefix];
+  if (typeof globalThis !== 'undefined' && typeof globalThis[specificKey] !== 'undefined') return globalThis[specificKey];
+  if (typeof globalThis !== 'undefined' && typeof globalThis[envPrefix] !== 'undefined') return globalThis[envPrefix];
   return null;
 }
 
@@ -99,8 +117,6 @@ function generateMapUrls(lat, lng) {
 
 /** 发送通知逻辑 **/
 async function handleNotify(request, url, userKey, env, KV) {
-  if (!KV) throw new Error('KV 存储未就绪，请确保在控制台创建了名为 MOVE_CAR_STATUS 的空间');
-
   const lockKey = "lock_" + userKey;
   const isLocked = await KV.get(lockKey);
   if (isLocked) throw new Error('发送太频繁，请一分钟后再试');
@@ -147,7 +163,8 @@ async function handleNotify(request, url, userKey, env, KV) {
     }));
   }
   if (barkUrl) {
-    const cleanBarkUrl = barkUrl.replace(/\/$/, ""); // 清除末尾可能多余的斜杠
+    // 防止用户末尾多带了斜杠
+    const cleanBarkUrl = barkUrl.replace(/\/$/, ""); 
     tasks.push(fetch(cleanBarkUrl + "/" + encodeURIComponent('挪车请求') + "/" + encodeURIComponent(plainTextMsg) + "?url=" + encodeURIComponent(confirmUrl)));
   }
 
@@ -156,7 +173,6 @@ async function handleNotify(request, url, userKey, env, KV) {
 }
 
 async function handleCheckStatus(userKey, KV) {
-  if (!KV) return new Response('{}');
   const status = await KV.get("status_" + userKey);
   const ownerLoc = await KV.get("owner_loc_" + userKey);
   return new Response(JSON.stringify({
@@ -166,13 +182,11 @@ async function handleCheckStatus(userKey, KV) {
 }
 
 async function handleGetLocation(userKey, KV) {
-  if (!KV) return new Response('{}');
   const data = await KV.get("loc_" + userKey);
   return new Response(data || '{}', { headers: { 'Content-Type': 'application/json' } });
 }
 
 async function handleOwnerConfirmAction(request, userKey, KV) {
-  if (!KV) return new Response(JSON.stringify({ success: false }));
   const body = await request.json();
   if (body.location && body.location.lat) {
     const urls = generateMapUrls(body.location.lat, body.location.lng);
