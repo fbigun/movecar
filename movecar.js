@@ -1,58 +1,79 @@
 /**
- * MoveCar 多用户智能挪车系统 - 并发隔离优化版
- * 隔离逻辑：每一个 KV 键值对都强制带上用户后缀，确保互不干扰
+ * MoveCar 多用户智能挪车系统 - 跨云安全重构版
+ * 支持平台: Cloudflare Workers, 腾讯云 EdgeOne, 阿里云 ESA
+ * 修复: XSS漏洞、HTML注入、兼容现代 ES Module 边缘函数规范
  */
-
-addEventListener('fetch', event => {
-  event.respondWith(handleRequest(event.request))
-})
 
 const CONFIG = {
   KV_TTL: 3600,         // 状态有效期：1 小时
   RATE_LIMIT_TTL: 60    // 单用户发送频率限制：60 秒
-}
+};
 
-async function handleRequest(request) {
-  const url = new URL(request.url)
-  const path = url.pathname
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      return await handleRequest(request, env);
+    } catch (e) {
+      return new Response(JSON.stringify({ success: false, error: e.message }), { 
+        status: 500, headers: { 'Content-Type': 'application/json' } 
+      });
+    }
+  }
+};
+
+async function handleRequest(request, env) {
+  const url = new URL(request.url);
+  const path = url.pathname;
   
-  // 1. 提取用户 ID (小写处理)
-  const userParam = url.searchParams.get('u') || 'default';
+  // [安全修复 1] 严格过滤 user ID，仅允许字母、数字、下划线、短横线，防止 XSS 和 KV 键名注入
+  let userParam = url.searchParams.get('u') || 'default';
+  userParam = userParam.replace(/[^a-zA-Z0-9_-]/g, ''); 
+  if (!userParam) userParam = 'default';
   const userKey = userParam.toLowerCase();
 
   // --- API 路由区 ---
   if (path === '/api/notify' && request.method === 'POST') {
-    return handleNotify(request, url, userKey);
+    return handleNotify(request, url, userKey, env);
   }
   if (path === '/api/get-location') {
-    return handleGetLocation(userKey);
+    return handleGetLocation(userKey, env);
   }
   if (path === '/api/owner-confirm' && request.method === 'POST') {
-    return handleOwnerConfirmAction(request, userKey);
+    return handleOwnerConfirmAction(request, userKey, env);
   }
   if (path === '/api/check-status') {
-    return handleCheckStatus(userKey);
+    return handleCheckStatus(userKey, env);
   }
 
   // --- 页面路由区 ---
   if (path === '/owner-confirm') {
-    return renderOwnerPage(userKey);
+    return renderOwnerPage(userKey, env);
   }
 
   // 默认进入扫码挪车首页
-  return renderMainPage(url.origin, userKey);
+  return renderMainPage(url.origin, userKey, env);
 }
 
-/** * 配置读取：优先读取 用户专用变量 (如 PUSHPLUS_TOKEN_NIANBA)
+// [安全修复 2] XSS 转义函数，防止用户留言在 PushPlus 端造成 HTML 注入
+function escapeHtml(unsafe) {
+  return (unsafe || '').toString()
+     .replace(/&/g, "&amp;")
+     .replace(/</g, "&lt;")
+     .replace(/>/g, "&gt;")
+     .replace(/"/g, "&quot;")
+     .replace(/'/g, "&#039;");
+}
+
+/** * [规范修复] 环境变量读取：从 env 对象中读取，而非全局 globalThis
  */
-function getUserConfig(userKey, envPrefix) {
+function getUserConfig(userKey, envPrefix, env) {
   const specificKey = envPrefix + "_" + userKey.toUpperCase();
-  if (typeof globalThis[specificKey] !== 'undefined') return globalThis[specificKey];
-  if (typeof globalThis[envPrefix] !== 'undefined') return globalThis[envPrefix];
+  if (env && typeof env[specificKey] !== 'undefined') return env[specificKey];
+  if (env && typeof env[envPrefix] !== 'undefined') return env[envPrefix];
   return null;
 }
 
-// 坐标转换 (WGS-84 转 GCJ-02)
+// 坐标转换 (WGS-84 转 GCJ-02) 保持不变
 function wgs84ToGcj02(lat, lng) {
   const a = 6378245.0; const ee = 0.00669342162296594323;
   if (lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271) return { lat, lng };
@@ -88,98 +109,99 @@ function generateMapUrls(lat, lng) {
 }
 
 /** 发送通知逻辑 **/
-async function handleNotify(request, url, userKey) {
-  try {
-    if (typeof MOVE_CAR_STATUS === 'undefined') throw new Error('KV 未绑定，请检查 Worker 设置');
+async function handleNotify(request, url, userKey, env) {
+  if (!env.MOVE_CAR_STATUS) throw new Error('KV 未绑定，请检查边缘函数设置');
 
-    // --- 关键修改：锁定键带上 userKey，实现每个用户独立计时 ---
-    const lockKey = "lock_" + userKey;
-    const isLocked = await MOVE_CAR_STATUS.get(lockKey);
-    if (isLocked) throw new Error('发送太频繁，请一分钟后再试');
+  const lockKey = "lock_" + userKey;
+  const isLocked = await env.MOVE_CAR_STATUS.get(lockKey);
+  if (isLocked) throw new Error('发送太频繁，请一分钟后再试');
 
-    const body = await request.json();
-    const message = body.message || '车旁有人等待';
-    const location = body.location || null;
-    const delayed = body.delayed || false;
+  const body = await request.json();
+  const rawMessage = body.message || '车旁有人等待';
+  // 转义防止 HTML 注入
+  const safeMessage = escapeHtml(rawMessage);
+  const location = body.location || null;
+  const delayed = body.delayed || false;
 
-    // 获取配置
-    const ppToken = getUserConfig(userKey, 'PUSHPLUS_TOKEN');
-    const barkUrl = getUserConfig(userKey, 'BARK_URL');
-    const carTitle = getUserConfig(userKey, 'CAR_TITLE') || '车主';
+  // 获取配置
+  const ppToken = getUserConfig(userKey, 'PUSHPLUS_TOKEN', env);
+  const barkUrl = getUserConfig(userKey, 'BARK_URL', env);
+  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
+  
+  if (!ppToken && !barkUrl) throw new Error('系统未配置推送渠道，通知失败');
 
-    const baseDomain = (typeof EXTERNAL_URL !== 'undefined' && EXTERNAL_URL) ? EXTERNAL_URL.replace(/\/$/, "") : url.origin;
-    const confirmUrl = baseDomain + "/owner-confirm?u=" + userKey;
+  const externalUrlConfig = getUserConfig(userKey, 'EXTERNAL_URL', env) || env.EXTERNAL_URL;
+  const baseDomain = externalUrlConfig ? externalUrlConfig.replace(/\/$/, "") : url.origin;
+  const confirmUrl = baseDomain + "/owner-confirm?u=" + userKey;
 
-    let notifyText = "🚗 挪车请求【" + carTitle + "】\\n💬 留言: " + message;
-    
-    // 隔离存储位置
-    if (location && location.lat) {
-      const maps = generateMapUrls(location.lat, location.lng);
-      notifyText += "\\n📍 已附带对方位置";
-      await MOVE_CAR_STATUS.put("loc_" + userKey, JSON.stringify({ ...location, ...maps }), { expirationTtl: CONFIG.KV_TTL });
-    }
-
-    // 隔离存储挪车状态
-    await MOVE_CAR_STATUS.put("status_" + userKey, 'waiting', { expirationTtl: CONFIG.KV_TTL });
-    await MOVE_CAR_STATUS.delete("owner_loc_" + userKey);
-    
-    // 设置针对该用户的 60秒 锁定
-    await MOVE_CAR_STATUS.put(lockKey, '1', { expirationTtl: CONFIG.RATE_LIMIT_TTL });
-
-    if (delayed) await new Promise(r => setTimeout(r, 30000));
-
-    const tasks = [];
-    if (ppToken) {
-      const htmlMsg = notifyText.replace(/\\n/g, '<br>') + '<br><br><a href="' + confirmUrl + '" style="font-weight:bold;color:#0093E9;font-size:18px;">【点击确认前往】</a>';
-      tasks.push(fetch('http://www.pushplus.plus/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: ppToken, title: "🚗 挪车请求：" + carTitle, content: htmlMsg, template: 'html' })
-      }));
-    }
-    if (barkUrl) {
-      tasks.push(fetch(barkUrl + "/" + encodeURIComponent('挪车请求') + "/" + encodeURIComponent(notifyText) + "?url=" + encodeURIComponent(confirmUrl)));
-    }
-
-    await Promise.all(tasks);
-    return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
-  } catch (e) {
-    return new Response(JSON.stringify({ success: false, error: e.message }), { status: 500 });
+  let plainTextMsg = "🚗 挪车请求【" + carTitle + "】\n💬 留言: " + rawMessage;
+  let htmlMsg = "🚗 挪车请求【" + carTitle + "】<br>💬 留言: " + safeMessage;
+  
+  if (location && location.lat) {
+    const maps = generateMapUrls(location.lat, location.lng);
+    plainTextMsg += "\n📍 已附带对方位置";
+    htmlMsg += "<br>📍 已附带对方位置";
+    await env.MOVE_CAR_STATUS.put("loc_" + userKey, JSON.stringify({ ...location, ...maps }), { expirationTtl: CONFIG.KV_TTL });
   }
+
+  await env.MOVE_CAR_STATUS.put("status_" + userKey, 'waiting', { expirationTtl: CONFIG.KV_TTL });
+  await env.MOVE_CAR_STATUS.delete("owner_loc_" + userKey);
+  await env.MOVE_CAR_STATUS.put(lockKey, '1', { expirationTtl: CONFIG.RATE_LIMIT_TTL });
+
+  if (delayed) await new Promise(r => setTimeout(r, 30000));
+
+  const tasks = [];
+  if (ppToken) {
+    const finalHtml = htmlMsg + '<br><br><a href="' + confirmUrl + '" style="font-weight:bold;color:#0093E9;font-size:18px;">【点击确认前往】</a>';
+    tasks.push(fetch('http://www.pushplus.plus/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: ppToken, title: "🚗 挪车请求：" + carTitle, content: finalHtml, template: 'html' })
+    }));
+  }
+  if (barkUrl) {
+    tasks.push(fetch(barkUrl + "/" + encodeURIComponent('挪车请求') + "/" + encodeURIComponent(plainTextMsg) + "?url=" + encodeURIComponent(confirmUrl)));
+  }
+
+  await Promise.all(tasks);
+  return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
 }
 
-async function handleCheckStatus(userKey) {
-  const status = await MOVE_CAR_STATUS.get("status_" + userKey);
-  const ownerLoc = await MOVE_CAR_STATUS.get("owner_loc_" + userKey);
+async function handleCheckStatus(userKey, env) {
+  if (!env.MOVE_CAR_STATUS) return new Response('{}');
+  const status = await env.MOVE_CAR_STATUS.get("status_" + userKey);
+  const ownerLoc = await env.MOVE_CAR_STATUS.get("owner_loc_" + userKey);
   return new Response(JSON.stringify({
     status: status || 'waiting',
     ownerLocation: ownerLoc ? JSON.parse(ownerLoc) : null
   }), { headers: { 'Content-Type': 'application/json' } });
 }
 
-async function handleGetLocation(userKey) {
-  const data = await MOVE_CAR_STATUS.get("loc_" + userKey);
+async function handleGetLocation(userKey, env) {
+  if (!env.MOVE_CAR_STATUS) return new Response('{}');
+  const data = await env.MOVE_CAR_STATUS.get("loc_" + userKey);
   return new Response(data || '{}', { headers: { 'Content-Type': 'application/json' } });
 }
 
-async function handleOwnerConfirmAction(request, userKey) {
+async function handleOwnerConfirmAction(request, userKey, env) {
+  if (!env.MOVE_CAR_STATUS) return new Response(JSON.stringify({ success: false }));
   const body = await request.json();
-  if (body.location) {
+  if (body.location && body.location.lat) {
     const urls = generateMapUrls(body.location.lat, body.location.lng);
-    await MOVE_CAR_STATUS.put("owner_loc_" + userKey, JSON.stringify({ ...body.location, ...urls }), { expirationTtl: 600 });
+    await env.MOVE_CAR_STATUS.put("owner_loc_" + userKey, JSON.stringify({ ...body.location, ...urls }), { expirationTtl: 600 });
   }
-  await MOVE_CAR_STATUS.put("status_" + userKey, 'confirmed', { expirationTtl: 600 });
+  await env.MOVE_CAR_STATUS.put("status_" + userKey, 'confirmed', { expirationTtl: 600 });
   return new Response(JSON.stringify({ success: true }));
 }
 
 /** 界面渲染：请求者页 **/
-function renderMainPage(origin, userKey) {
-  const phone = getUserConfig(userKey, 'PHONE_NUMBER') || '';
-  const carTitle = getUserConfig(userKey, 'CAR_TITLE') || '车主';
+function renderMainPage(origin, userKey, env) {
+  const phone = escapeHtml(getUserConfig(userKey, 'PHONE_NUMBER', env) || '');
+  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
   const phoneHtml = phone ? '<a href="tel:' + phone + '" class="btn-phone">📞 拨打车主电话</a>' : '';
 
-  return new Response(`
-<!DOCTYPE html>
+  // HTML模板中注入的 userKey 和其他变量均已过白名单或 escape 转义，杜绝 XSS
+  const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
@@ -227,7 +249,7 @@ function renderMainPage(origin, userKey) {
     <div class="card" style="text-align:center">
       <div style="font-size:60px; margin-bottom:15px">✅</div>
       <h2 style="margin-bottom:8px">通知已发出</h2>
-      <p id="waitingText" style="color:#666">车主微信已收到提醒，请稍候</p>
+      <p id="waitingText" style="color:#666">车主已收到提醒，请稍候</p>
     </div>
     <div id="ownerFeedback" class="card hidden" style="text-align:center">
       <div style="font-size:40px">🏃‍♂️</div>
@@ -275,7 +297,7 @@ function renderMainPage(origin, userKey) {
           document.getElementById('successView').classList.remove('hidden');
           pollStatus();
         } else { alert(data.error); btn.disabled = false; btn.innerText = '🔔 发送通知'; }
-      } catch(e) { alert('系统忙'); btn.disabled = false; }
+      } catch(e) { alert('系统忙，请稍后再试'); btn.disabled = false; }
     }
 
     function pollStatus() {
@@ -293,15 +315,14 @@ function renderMainPage(origin, userKey) {
     }
   </script>
 </body>
-</html>
-`, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+</html>`;
+  return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
 }
 
 /** 界面渲染：车主页 **/
-function renderOwnerPage(userKey) {
-  const carTitle = getUserConfig(userKey, 'CAR_TITLE') || '车主';
-  return new Response(`
-<!DOCTYPE html>
+function renderOwnerPage(userKey, env) {
+  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
+  const html = `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
@@ -346,10 +367,12 @@ function renderOwnerPage(userKey) {
         }, async () => {
           await fetch('/api/owner-confirm?u=' + userKey, { method: 'POST', body: JSON.stringify({ location: null }) });
         });
+      } else {
+        await fetch('/api/owner-confirm?u=' + userKey, { method: 'POST', body: JSON.stringify({ location: null }) });
       }
     }
   </script>
 </body>
-</html>
-`, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+</html>`;
+  return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
 }
