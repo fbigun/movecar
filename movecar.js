@@ -1,7 +1,7 @@
 /**
  * MoveCar 多用户智能挪车系统 - 跨云安全重构版
  * 支持平台: Cloudflare Workers, 腾讯云 EdgeOne, 阿里云 ESA
- * 修复: XSS漏洞、HTML注入、兼容现代 ES Module 边缘函数规范
+ * 修复: 阿里云 ESA 环境变量及 KV 全局注入的兼容性适配
  */
 
 const CONFIG = {
@@ -12,7 +12,9 @@ const CONFIG = {
 export default {
   async fetch(request, env, ctx) {
     try {
-      return await handleRequest(request, env);
+      // [核心兼容] 兼容 Cloudflare(从 env 读取) 和 阿里云ESA(从 globalThis 读取)
+      const KV = (env && env.MOVE_CAR_STATUS) || globalThis.MOVE_CAR_STATUS;
+      return await handleRequest(request, env, KV);
     } catch (e) {
       return new Response(JSON.stringify({ success: false, error: e.message }), { 
         status: 500, headers: { 'Content-Type': 'application/json' } 
@@ -21,40 +23,26 @@ export default {
   }
 };
 
-async function handleRequest(request, env) {
+async function handleRequest(request, env, KV) {
   const url = new URL(request.url);
   const path = url.pathname;
   
-  // [安全修复 1] 严格过滤 user ID，仅允许字母、数字、下划线、短横线，防止 XSS 和 KV 键名注入
+  // 严格过滤 user ID，防 XSS 和 KV 键名注入
   let userParam = url.searchParams.get('u') || 'default';
   userParam = userParam.replace(/[^a-zA-Z0-9_-]/g, ''); 
   if (!userParam) userParam = 'default';
   const userKey = userParam.toLowerCase();
 
-  // --- API 路由区 ---
-  if (path === '/api/notify' && request.method === 'POST') {
-    return handleNotify(request, url, userKey, env);
-  }
-  if (path === '/api/get-location') {
-    return handleGetLocation(userKey, env);
-  }
-  if (path === '/api/owner-confirm' && request.method === 'POST') {
-    return handleOwnerConfirmAction(request, userKey, env);
-  }
-  if (path === '/api/check-status') {
-    return handleCheckStatus(userKey, env);
-  }
+  if (path === '/api/notify' && request.method === 'POST') return handleNotify(request, url, userKey, env, KV);
+  if (path === '/api/get-location') return handleGetLocation(userKey, KV);
+  if (path === '/api/owner-confirm' && request.method === 'POST') return handleOwnerConfirmAction(request, userKey, KV);
+  if (path === '/api/check-status') return handleCheckStatus(userKey, KV);
+  if (path === '/owner-confirm') return renderOwnerPage(userKey, env);
 
-  // --- 页面路由区 ---
-  if (path === '/owner-confirm') {
-    return renderOwnerPage(userKey, env);
-  }
-
-  // 默认进入扫码挪车首页
   return renderMainPage(url.origin, userKey, env);
 }
 
-// [安全修复 2] XSS 转义函数，防止用户留言在 PushPlus 端造成 HTML 注入
+// XSS 转义函数
 function escapeHtml(unsafe) {
   return (unsafe || '').toString()
      .replace(/&/g, "&amp;")
@@ -64,16 +52,17 @@ function escapeHtml(unsafe) {
      .replace(/'/g, "&#039;");
 }
 
-/** * [规范修复] 环境变量读取：从 env 对象中读取，而非全局 globalThis
- */
+/** 获取环境变量，兼容阿里云和 CF */
 function getUserConfig(userKey, envPrefix, env) {
   const specificKey = envPrefix + "_" + userKey.toUpperCase();
   if (env && typeof env[specificKey] !== 'undefined') return env[specificKey];
   if (env && typeof env[envPrefix] !== 'undefined') return env[envPrefix];
+  if (typeof globalThis[specificKey] !== 'undefined') return globalThis[specificKey];
+  if (typeof globalThis[envPrefix] !== 'undefined') return globalThis[envPrefix];
   return null;
 }
 
-// 坐标转换 (WGS-84 转 GCJ-02) 保持不变
+// 坐标转换 (WGS-84 转 GCJ-02)
 function wgs84ToGcj02(lat, lng) {
   const a = 6378245.0; const ee = 0.00669342162296594323;
   if (lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271) return { lat, lng };
@@ -109,28 +98,26 @@ function generateMapUrls(lat, lng) {
 }
 
 /** 发送通知逻辑 **/
-async function handleNotify(request, url, userKey, env) {
-  if (!env.MOVE_CAR_STATUS) throw new Error('KV 未绑定，请检查边缘函数设置');
+async function handleNotify(request, url, userKey, env, KV) {
+  if (!KV) throw new Error('KV 存储未就绪，请确保在控制台创建了名为 MOVE_CAR_STATUS 的空间');
 
   const lockKey = "lock_" + userKey;
-  const isLocked = await env.MOVE_CAR_STATUS.get(lockKey);
+  const isLocked = await KV.get(lockKey);
   if (isLocked) throw new Error('发送太频繁，请一分钟后再试');
 
   const body = await request.json();
   const rawMessage = body.message || '车旁有人等待';
-  // 转义防止 HTML 注入
   const safeMessage = escapeHtml(rawMessage);
   const location = body.location || null;
   const delayed = body.delayed || false;
 
-  // 获取配置
   const ppToken = getUserConfig(userKey, 'PUSHPLUS_TOKEN', env);
   const barkUrl = getUserConfig(userKey, 'BARK_URL', env);
   const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
   
-  if (!ppToken && !barkUrl) throw new Error('系统未配置推送渠道，通知失败');
+  if (!ppToken && !barkUrl) throw new Error('系统未配置推送渠道(BARK或PushPlus)，通知失败');
 
-  const externalUrlConfig = getUserConfig(userKey, 'EXTERNAL_URL', env) || env.EXTERNAL_URL;
+  const externalUrlConfig = getUserConfig(userKey, 'EXTERNAL_URL', env);
   const baseDomain = externalUrlConfig ? externalUrlConfig.replace(/\/$/, "") : url.origin;
   const confirmUrl = baseDomain + "/owner-confirm?u=" + userKey;
 
@@ -141,12 +128,12 @@ async function handleNotify(request, url, userKey, env) {
     const maps = generateMapUrls(location.lat, location.lng);
     plainTextMsg += "\n📍 已附带对方位置";
     htmlMsg += "<br>📍 已附带对方位置";
-    await env.MOVE_CAR_STATUS.put("loc_" + userKey, JSON.stringify({ ...location, ...maps }), { expirationTtl: CONFIG.KV_TTL });
+    await KV.put("loc_" + userKey, JSON.stringify({ ...location, ...maps }), { expirationTtl: CONFIG.KV_TTL });
   }
 
-  await env.MOVE_CAR_STATUS.put("status_" + userKey, 'waiting', { expirationTtl: CONFIG.KV_TTL });
-  await env.MOVE_CAR_STATUS.delete("owner_loc_" + userKey);
-  await env.MOVE_CAR_STATUS.put(lockKey, '1', { expirationTtl: CONFIG.RATE_LIMIT_TTL });
+  await KV.put("status_" + userKey, 'waiting', { expirationTtl: CONFIG.KV_TTL });
+  await KV.delete("owner_loc_" + userKey);
+  await KV.put(lockKey, '1', { expirationTtl: CONFIG.RATE_LIMIT_TTL });
 
   if (delayed) await new Promise(r => setTimeout(r, 30000));
 
@@ -160,37 +147,38 @@ async function handleNotify(request, url, userKey, env) {
     }));
   }
   if (barkUrl) {
-    tasks.push(fetch(barkUrl + "/" + encodeURIComponent('挪车请求') + "/" + encodeURIComponent(plainTextMsg) + "?url=" + encodeURIComponent(confirmUrl)));
+    const cleanBarkUrl = barkUrl.replace(/\/$/, ""); // 清除末尾可能多余的斜杠
+    tasks.push(fetch(cleanBarkUrl + "/" + encodeURIComponent('挪车请求') + "/" + encodeURIComponent(plainTextMsg) + "?url=" + encodeURIComponent(confirmUrl)));
   }
 
   await Promise.all(tasks);
   return new Response(JSON.stringify({ success: true }), { headers: { 'Content-Type': 'application/json' } });
 }
 
-async function handleCheckStatus(userKey, env) {
-  if (!env.MOVE_CAR_STATUS) return new Response('{}');
-  const status = await env.MOVE_CAR_STATUS.get("status_" + userKey);
-  const ownerLoc = await env.MOVE_CAR_STATUS.get("owner_loc_" + userKey);
+async function handleCheckStatus(userKey, KV) {
+  if (!KV) return new Response('{}');
+  const status = await KV.get("status_" + userKey);
+  const ownerLoc = await KV.get("owner_loc_" + userKey);
   return new Response(JSON.stringify({
     status: status || 'waiting',
     ownerLocation: ownerLoc ? JSON.parse(ownerLoc) : null
   }), { headers: { 'Content-Type': 'application/json' } });
 }
 
-async function handleGetLocation(userKey, env) {
-  if (!env.MOVE_CAR_STATUS) return new Response('{}');
-  const data = await env.MOVE_CAR_STATUS.get("loc_" + userKey);
+async function handleGetLocation(userKey, KV) {
+  if (!KV) return new Response('{}');
+  const data = await KV.get("loc_" + userKey);
   return new Response(data || '{}', { headers: { 'Content-Type': 'application/json' } });
 }
 
-async function handleOwnerConfirmAction(request, userKey, env) {
-  if (!env.MOVE_CAR_STATUS) return new Response(JSON.stringify({ success: false }));
+async function handleOwnerConfirmAction(request, userKey, KV) {
+  if (!KV) return new Response(JSON.stringify({ success: false }));
   const body = await request.json();
   if (body.location && body.location.lat) {
     const urls = generateMapUrls(body.location.lat, body.location.lng);
-    await env.MOVE_CAR_STATUS.put("owner_loc_" + userKey, JSON.stringify({ ...body.location, ...urls }), { expirationTtl: 600 });
+    await KV.put("owner_loc_" + userKey, JSON.stringify({ ...body.location, ...urls }), { expirationTtl: 600 });
   }
-  await env.MOVE_CAR_STATUS.put("status_" + userKey, 'confirmed', { expirationTtl: 600 });
+  await KV.put("status_" + userKey, 'confirmed', { expirationTtl: 600 });
   return new Response(JSON.stringify({ success: true }));
 }
 
@@ -200,7 +188,6 @@ function renderMainPage(origin, userKey, env) {
   const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
   const phoneHtml = phone ? '<a href="tel:' + phone + '" class="btn-phone">📞 拨打车主电话</a>' : '';
 
-  // HTML模板中注入的 userKey 和其他变量均已过白名单或 escape 转义，杜绝 XSS
   const html = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
