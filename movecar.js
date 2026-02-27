@@ -1,6 +1,7 @@
 /**
- * MoveCar 跨云终极适配版 + 动态 KV 配置加载
- * 完美解决阿里云 ESA 无打包流程时，无法读取环境变量的问题
+ * MoveCar 跨云终极性能版 - 突破 KV 操作次数红线
+ * 1. 状态合并：5 次 KV 读写压缩为 1 读 1 写。
+ * 2. 内存穿透：静态配置缓存在 globalThis 内存中，0 消耗读取。
  */
 
 const CONFIG = {
@@ -21,7 +22,7 @@ export default {
       }
 
       if (!KV) {
-         return new Response(JSON.stringify({ success: false, error: 'KV存储未就绪，请检查空间名是否为 MOVE_CAR_STATUS' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+         return new Response(JSON.stringify({ success: false, error: 'KV存储未就绪，请检查空间名' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
       }
       return await handleRequest(request, env, KV);
     } catch (e) {
@@ -54,32 +55,44 @@ function escapeHtml(unsafe) {
   return (unsafe || '').toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-// 核心升级：如果环境变量里找不到，就去 KV 数据库里找！
+/** 核心优化 2：内存级配置缓存机制，疯狂压缩 KV 调取次数 */
+async function getCachedKV(KV, key) {
+   const now = Date.now();
+   globalThis.__KV_CACHE__ = globalThis.__KV_CACHE__ || {};
+   const cached = globalThis.__KV_CACHE__[key];
+   
+   // 内存缓存 60 秒内有效，直接返回内存数据，不消耗 KV 请求额度
+   if (cached && (now - cached.ts < 60000)) return cached.val;
+   
+   try {
+       const val = await KV.get(key);
+       globalThis.__KV_CACHE__[key] = { val, ts: now };
+       return val;
+   } catch (e) {
+       return null; // 若触发系统限流保护，优雅返回 null
+   }
+}
+
 async function getUserConfig(userKey, envPrefix, env, KV) {
   const specificKey = envPrefix + "_" + userKey.toUpperCase();
   let val = null;
   
-  if (env && env[specificKey]) val = env[specificKey];
-  else if (env && env[envPrefix]) val = env[envPrefix];
-  
-  if (!val && typeof globalThis !== 'undefined') {
-    if (globalThis[specificKey]) val = globalThis[specificKey];
-    else if (globalThis[envPrefix]) val = globalThis[envPrefix];
+  if (env && env[specificKey]) return env[specificKey];
+  if (env && env[envPrefix]) return env[envPrefix];
+  if (typeof globalThis !== 'undefined') {
+    if (globalThis[specificKey]) return globalThis[specificKey];
+    if (globalThis[envPrefix]) return globalThis[envPrefix];
   }
 
-  if (!val && typeof process !== 'undefined' && process.env) {
-    if (process.env[specificKey]) val = process.env[specificKey];
-    else if (process.env[envPrefix]) val = process.env[envPrefix];
+  // 走 KV 时利用内存缓存
+  if (KV) {
+     if (userKey !== 'default') {
+        val = await getCachedKV(KV, specificKey);
+     }
+     if (!val) {
+        val = await getCachedKV(KV, envPrefix);
+     }
   }
-  
-  // 从 KV 数据库读取配置
-  if (!val && KV) {
-      try {
-          val = await KV.get(specificKey);
-          if (!val) val = await KV.get(envPrefix);
-      } catch (e) {}
-  }
-  
   return val;
 }
 
@@ -120,36 +133,42 @@ async function handleNotify(request, url, userKey, env, KV) {
   const carTitle = escapeHtml((await getUserConfig(userKey, 'CAR_TITLE', env, KV)) || '车主');
   
   if (!ppToken && !barkUrl) {
-      throw new Error('系统未配置推送渠道(BARK或PushPlus)，请在 KV 存储中点击"添加 KV 数据"来配置。');
+      throw new Error('未配置推送渠道，请在KV存储中添加 BARK_URL 或 PUSHPLUS_TOKEN');
   }
-
-  const lockKey = "lock_" + userKey;
-  const isLocked = await KV.get(lockKey);
-  if (isLocked) throw new Error('发送太频繁，请一分钟后再试');
 
   const body = await request.json();
   const rawMessage = body.message || '车旁有人等待';
   const safeMessage = escapeHtml(rawMessage);
   const location = body.location || null;
   const delayed = body.delayed || false;
+  const confirmUrl = url.origin + "/owner-confirm?u=" + userKey;
 
-  const externalUrlConfig = await getUserConfig(userKey, 'EXTERNAL_URL', env, KV);
-  const baseDomain = externalUrlConfig ? externalUrlConfig.replace(/\/$/, "") : url.origin;
-  const confirmUrl = baseDomain + "/owner-confirm?u=" + userKey;
+  /** 核心优化 1：状态压缩打包，单次读写搞定所有流转 */
+  let sessionRaw = await KV.get("session_" + userKey);
+  let session = sessionRaw ? JSON.parse(sessionRaw) : {};
+  
+  const now = Date.now();
+  if (session.lockUntil && now < session.lockUntil) {
+      throw new Error('发送太频繁，请一分钟后再试');
+  }
+
+  session.status = 'waiting';
+  if (location && location.lat) {
+     session.loc = { ...location, ...generateMapUrls(location.lat, location.lng) };
+  }
+  delete session.owner_loc;
+  session.lockUntil = now + (CONFIG.RATE_LIMIT_TTL * 1000);
+
+  // 仅用 1 次 PUT 保存所有更新
+  await KV.put("session_" + userKey, JSON.stringify(session), { expirationTtl: CONFIG.KV_TTL });
 
   let plainTextMsg = "🚗 挪车请求【" + carTitle + "】\n💬 留言: " + rawMessage;
   let htmlMsg = "🚗 挪车请求【" + carTitle + "】<br>💬 留言: " + safeMessage;
   
   if (location && location.lat) {
-    const maps = generateMapUrls(location.lat, location.lng);
     plainTextMsg += "\n📍 已附带对方位置";
     htmlMsg += "<br>📍 已附带对方位置";
-    await KV.put("loc_" + userKey, JSON.stringify({ ...location, ...maps }), { expirationTtl: CONFIG.KV_TTL });
   }
-
-  await KV.put("status_" + userKey, 'waiting', { expirationTtl: CONFIG.KV_TTL });
-  await KV.delete("owner_loc_" + userKey);
-  await KV.put(lockKey, '1', { expirationTtl: CONFIG.RATE_LIMIT_TTL });
 
   if (delayed) await new Promise(r => setTimeout(r, 30000));
 
@@ -172,23 +191,27 @@ async function handleNotify(request, url, userKey, env, KV) {
 }
 
 async function handleCheckStatus(userKey, KV) {
-  const status = await KV.get("status_" + userKey);
-  const ownerLoc = await KV.get("owner_loc_" + userKey);
-  return new Response(JSON.stringify({ status: status || 'waiting', ownerLocation: ownerLoc ? JSON.parse(ownerLoc) : null }), { headers: { 'Content-Type': 'application/json' } });
+  let sessionRaw = await KV.get("session_" + userKey);
+  let session = sessionRaw ? JSON.parse(sessionRaw) : {};
+  return new Response(JSON.stringify({ status: session.status || 'waiting', ownerLocation: session.owner_loc || null }), { headers: { 'Content-Type': 'application/json' } });
 }
 
 async function handleGetLocation(userKey, KV) {
-  const data = await KV.get("loc_" + userKey);
-  return new Response(data || '{}', { headers: { 'Content-Type': 'application/json' } });
+  let sessionRaw = await KV.get("session_" + userKey);
+  let session = sessionRaw ? JSON.parse(sessionRaw) : {};
+  return new Response(JSON.stringify(session.loc || {}), { headers: { 'Content-Type': 'application/json' } });
 }
 
 async function handleOwnerConfirmAction(request, userKey, KV) {
   const body = await request.json();
+  let sessionRaw = await KV.get("session_" + userKey);
+  let session = sessionRaw ? JSON.parse(sessionRaw) : {};
+  
+  session.status = 'confirmed';
   if (body.location && body.location.lat) {
-    const urls = generateMapUrls(body.location.lat, body.location.lng);
-    await KV.put("owner_loc_" + userKey, JSON.stringify({ ...body.location, ...urls }), { expirationTtl: 600 });
+     session.owner_loc = { ...body.location, ...generateMapUrls(body.location.lat, body.location.lng) };
   }
-  await KV.put("status_" + userKey, 'confirmed', { expirationTtl: 600 });
+  await KV.put("session_" + userKey, JSON.stringify(session), { expirationTtl: 600 });
   return new Response(JSON.stringify({ success: true }));
 }
 
