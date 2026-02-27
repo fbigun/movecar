@@ -1,6 +1,6 @@
 /**
- * MoveCar 跨云终极适配版 + 强力诊断 (修复版)
- * 删除了重复声明的函数，确保阿里云 ESA 构建成功
+ * MoveCar 跨云终极适配版 + 动态 KV 配置加载
+ * 完美解决阿里云 ESA 无打包流程时，无法读取环境变量的问题
  */
 
 const CONFIG = {
@@ -41,20 +41,21 @@ async function handleRequest(request, env, KV) {
   if (!userParam) userParam = 'default';
   const userKey = userParam.toLowerCase();
 
-  if (path === '/api/notify' && request.method === 'POST') return handleNotify(request, url, userKey, env, KV);
-  if (path === '/api/get-location') return handleGetLocation(userKey, KV);
-  if (path === '/api/owner-confirm' && request.method === 'POST') return handleOwnerConfirmAction(request, userKey, KV);
-  if (path === '/api/check-status') return handleCheckStatus(userKey, KV);
-  if (path === '/owner-confirm') return renderOwnerPage(userKey, env);
+  if (path === '/api/notify' && request.method === 'POST') return await handleNotify(request, url, userKey, env, KV);
+  if (path === '/api/get-location') return await handleGetLocation(userKey, KV);
+  if (path === '/api/owner-confirm' && request.method === 'POST') return await handleOwnerConfirmAction(request, userKey, KV);
+  if (path === '/api/check-status') return await handleCheckStatus(userKey, KV);
+  if (path === '/owner-confirm') return await renderOwnerPage(userKey, env, KV);
 
-  return renderMainPage(url.origin, userKey, env);
+  return await renderMainPage(url.origin, userKey, env, KV);
 }
 
 function escapeHtml(unsafe) {
   return (unsafe || '').toString().replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-function getUserConfig(userKey, envPrefix, env) {
+// 核心升级：如果环境变量里找不到，就去 KV 数据库里找！
+async function getUserConfig(userKey, envPrefix, env, KV) {
   const specificKey = envPrefix + "_" + userKey.toUpperCase();
   let val = null;
   
@@ -70,10 +71,18 @@ function getUserConfig(userKey, envPrefix, env) {
     if (process.env[specificKey]) val = process.env[specificKey];
     else if (process.env[envPrefix]) val = process.env[envPrefix];
   }
+  
+  // 从 KV 数据库读取配置
+  if (!val && KV) {
+      try {
+          val = await KV.get(specificKey);
+          if (!val) val = await KV.get(envPrefix);
+      } catch (e) {}
+  }
+  
   return val;
 }
 
-// 坐标转换函数 (只保留一次)
 function wgs84ToGcj02(lat, lng) {
   const a = 6378245.0; const ee = 0.00669342162296594323;
   if (lng < 72.004 || lng > 137.8347 || lat < 0.8293 || lat > 55.8271) return { lat, lng };
@@ -106,17 +115,12 @@ function generateMapUrls(lat, lng) {
 }
 
 async function handleNotify(request, url, userKey, env, KV) {
-  const ppToken = getUserConfig(userKey, 'PUSHPLUS_TOKEN', env);
-  const barkUrl = getUserConfig(userKey, 'BARK_URL', env);
-  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
+  const ppToken = await getUserConfig(userKey, 'PUSHPLUS_TOKEN', env, KV);
+  const barkUrl = await getUserConfig(userKey, 'BARK_URL', env, KV);
+  const carTitle = escapeHtml((await getUserConfig(userKey, 'CAR_TITLE', env, KV)) || '车主');
   
   if (!ppToken && !barkUrl) {
-      let debugInfo = "env是空的";
-      if (env) {
-          try { debugInfo = "包含的键: " + Object.keys(env).join(', '); } 
-          catch(e) { debugInfo = "env不可枚举"; }
-      }
-      throw new Error(`系统未配置推送渠道(BARK或PushPlus)。诊断信息: [${debugInfo}]`);
+      throw new Error('系统未配置推送渠道(BARK或PushPlus)，请在 KV 存储中点击"添加 KV 数据"来配置。');
   }
 
   const lockKey = "lock_" + userKey;
@@ -129,7 +133,7 @@ async function handleNotify(request, url, userKey, env, KV) {
   const location = body.location || null;
   const delayed = body.delayed || false;
 
-  const externalUrlConfig = getUserConfig(userKey, 'EXTERNAL_URL', env);
+  const externalUrlConfig = await getUserConfig(userKey, 'EXTERNAL_URL', env, KV);
   const baseDomain = externalUrlConfig ? externalUrlConfig.replace(/\/$/, "") : url.origin;
   const confirmUrl = baseDomain + "/owner-confirm?u=" + userKey;
 
@@ -188,9 +192,9 @@ async function handleOwnerConfirmAction(request, userKey, KV) {
   return new Response(JSON.stringify({ success: true }));
 }
 
-function renderMainPage(origin, userKey, env) {
-  const phone = escapeHtml(getUserConfig(userKey, 'PHONE_NUMBER', env) || '');
-  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
+async function renderMainPage(origin, userKey, env, KV) {
+  const phone = escapeHtml((await getUserConfig(userKey, 'PHONE_NUMBER', env, KV)) || '');
+  const carTitle = escapeHtml((await getUserConfig(userKey, 'CAR_TITLE', env, KV)) || '车主');
   const phoneHtml = phone ? `<a href="tel:${phone}" class="btn-phone">📞 拨打车主电话</a>` : '';
 
   const html = `<!DOCTYPE html>
@@ -311,8 +315,8 @@ function renderMainPage(origin, userKey, env) {
   return new Response(html, { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
 }
 
-function renderOwnerPage(userKey, env) {
-  const carTitle = escapeHtml(getUserConfig(userKey, 'CAR_TITLE', env) || '车主');
+async function renderOwnerPage(userKey, env, KV) {
+  const carTitle = escapeHtml((await getUserConfig(userKey, 'CAR_TITLE', env, KV)) || '车主');
   const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -322,7 +326,7 @@ function renderOwnerPage(userKey, env) {
   <style>
     body { font-family: sans-serif; background: #667eea; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin:0; padding:20px; }
     .card { background: white; padding: 30px; border-radius: 28px; text-align: center; width: 100%; max-width: 400px; }
-    .btn { background: #10b981; color: white; border: none; width: 100%; padding: 20px; border-radius: 16px; font-size: 18px; font-weight: bold; cursor: margin-top: 20px; }
+    .btn { background: #10b981; color: white; border: none; width: 100%; padding: 20px; border-radius: 16px; font-size: 18px; font-weight: bold; cursor: pointer; margin-top: 20px; }
     .map-box { display: none; background: #f0f4ff; padding: 15px; border-radius: 15px; margin-top: 15px; }
     .map-btn { display: inline-block; padding: 10px 15px; background: #1890ff; color: white; text-decoration: none; border-radius: 10px; margin: 5px; font-size: 14px; }
   </style>
